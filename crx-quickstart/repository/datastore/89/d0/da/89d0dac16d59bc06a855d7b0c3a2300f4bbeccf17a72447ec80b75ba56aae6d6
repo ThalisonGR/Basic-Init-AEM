@@ -1,0 +1,489 @@
+/*
+ * ADOBE CONFIDENTIAL
+ *
+ * Copyright 2016 Adobe Systems Incorporated
+ * All Rights Reserved.
+ *
+ * NOTICE:  All information contained herein is, and remains
+ * the property of Adobe Systems Incorporated and its suppliers,
+ * if any.  The intellectual and technical concepts contained
+ * herein are proprietary to Adobe Systems Incorporated and its
+ * suppliers and may be covered by U.S. and Foreign Patents,
+ * patents in process, and are protected by trade secret or copyright law.
+ * Dissemination of this information or reproduction of this material
+ * is strictly forbidden unless prior written permission is obtained
+ * from Adobe Systems Incorporated.
+ *
+ */
+(function(document, $) {
+    "use strict";
+    var prevAsset;
+    var nextAsset;
+    var currentAsset;
+    var currentAssetIndex;
+    var totalAssets;
+    var formChanged = false;
+    var formId = "#cq-damadmin-manage-tags-form";
+    var manageTagsInfoRel = "#managetags-info";
+    var vanityPath = "/aem/managetags.html";
+    var manageTagsPromoteActivator = "#managetags-promote-activator";
+    var manageTagsDeleteActivator = "#managetags-delete-activator";
+    var manageTagsSaveActivator = "#managetags-save-activator";
+    var cancelButton = ".foundation-wizard-control[data-foundation-wizard-control-action='cancel']";
+    var backHref = undefined;
+
+    var DEFAULT_TAG_NAME_ATTRIBUTE = "./jcr:content/metadata/cq:tags";
+
+
+    function saveChanges() {
+        createNewTags().done(function() {
+            var formData = requestDataTransform($(formId).serializeArray());
+            var postUrl = $(formId).prop("action");
+            $.ajax({
+                type: "patch",
+                contentType: "application/json-patch+json",
+                url: Granite.HTTP.externalize(postUrl),
+                data: formData,
+                cache: false,
+                async: false,
+                success: function(response) {
+                    var ui = $(window).adaptTo("foundation-ui");
+                    var successMessage = Granite.I18n.get("Changes Saved.");
+                    ui.prompt(Granite.I18n.get("Success"), successMessage, "success", [{
+                        text: Granite.I18n.get("OK"),
+                        primary: true,
+                        handler: function() {
+                            disableSave();
+                        }
+                    }]);
+                },
+                error: function() {
+                    var content = Granite.I18n.get("Failed to save changes.");
+                    var ui = $(window).adaptTo("foundation-ui");
+                    ui.prompt(Granite.I18n.get("Error"), content, "error", [{
+                        text: Granite.I18n.get("Close"),
+                        primary: true
+                    }]);
+                }
+
+            });
+        }).fail(function(response) {
+            var content = Granite.I18n.get("Unable to create new tags. Check for access privileges to create tags.");
+            var ui = $(window).adaptTo("foundation-ui");
+            ui.prompt(Granite.I18n.get("Error"), content, "error", [{
+                text: Granite.I18n.get("Close"),
+                primary: true
+            }]);
+        });
+    }
+
+    function requestDataTransform(rawArrays) {
+        // transform data for r-api request
+        var promotedTags = [];
+        var smartTags = [];
+        var tags = [];
+        var hasPromotedTag = false;
+        rawArrays.forEach(function(rawData) {
+            if (rawData.name === "./jcr:content/metadata/cq:tags") {
+                tags.push(rawData.value);
+            } else if (rawData.name === "predicted-smart-tags") {
+                if (hasPromotedTag) {
+                    hasPromotedTag = false;
+                    createPromotedTag(rawData.value, promotedTags);
+                } else {
+                    smartTags.push(rawData.value);
+                }
+            } else if (rawData.name === "promoted-smart-tags") {
+                // for newly promoted tag, it has value: promoted-smartTag-<new tag name>
+                // for existing promoted tag, it just has tag name. So, for the newly promoted tag case, set the
+                // hasPromotedTag=true and get the tag name from predicted-smart-tags object
+                if (String(rawData.value).startsWith("promoted-smartTag-")) {
+                    hasPromotedTag = true;
+                    return;
+                } else {
+                    createPromotedTag(rawData.value, promotedTags);
+                }
+            }
+        });
+
+        var requestBody = [];
+        if (tags.length > 0) {
+            var regularTagsObject = {};
+            regularTagsObject.op = "add";
+            regularTagsObject.path = "/xcm:keywords";
+            regularTagsObject.value = tags;
+            requestBody.push(regularTagsObject);
+        }
+        if (smartTags.length > 0 || promotedTags.length > 0) {
+            var smartTagsObject = {};
+            smartTagsObject.op = "add";
+            smartTagsObject.path = "/xcm:machineKeywords";
+            smartTagsObject.value = [].concat(smartTags, promotedTags);
+            requestBody.push(smartTagsObject);
+        }
+        return JSON.stringify(requestBody);
+    }
+
+    function createPromotedTag(name, promotedTags) {
+        var data = {};
+        data.name = name;
+        data.confidence = 1;
+        promotedTags.push(data);
+    }
+
+    function enableSave() {
+        formChanged = true;
+        $(".foundation-wizard").adaptTo("foundation-wizard").toggleNext(true);
+    }
+
+    function disableSave() {
+        formChanged = false;
+        $(".foundation-wizard").adaptTo("foundation-wizard").toggleNext(false);
+    }
+
+    function showPrompt(url) {
+        var content = Granite.I18n.get("There are unsaved changes. Do you want to save your changes?");
+        var ui = $(window).adaptTo("foundation-ui");
+        ui.prompt(Granite.I18n.get("Warning"), content, "error", [{
+            text: Granite.I18n.get("Yes"),
+            primary: true,
+            handler: function() {
+                saveChanges();
+                window.location.assign(url);
+            }
+
+        }, {
+
+            text: Granite.I18n.get("No"),
+            handler: function() {
+                window.location.assign(url);
+            }
+
+        }]);
+    }
+
+    $(document).on("foundation-contentloaded", function(e) {
+        $("#promoted-tags-heading").hide();
+        prevAsset = $(manageTagsInfoRel).attr("prevAsset");
+        nextAsset = $(manageTagsInfoRel).attr("nextAsset");
+        currentAsset = $(manageTagsInfoRel).attr("currentAsset");
+        currentAssetIndex = $(manageTagsInfoRel).attr("currentAssetLocation");
+        totalAssets = $(manageTagsInfoRel).attr("totalAssets");
+        vanityPath = $(manageTagsInfoRel).attr("vanityPath");
+        $("#managetags-assetcount-button").html(currentAssetIndex + "/" + totalAssets);
+        // for smart tags's tag change
+        $(".predicted-smart-tags, .promoted-smart-tags").on("change", function(e) {
+            enableSave();
+        });
+        // for tags field's tag change
+        $(document).on("foundation-field-change", ".cq-ui-tagfield", function(e) {
+            enableSave();
+        });
+    });
+
+    requestAnimationFrame(function() {
+        _updateBackHref();
+    });
+
+    function _updateBackHref() {
+        backHref = _findBackHrefFromLocation();
+        if (!backHref) {
+            backHref = _getCurrentLocation();
+        }
+        if (backHref.length !== 0) {
+            $(cancelButton).attr("href", backHref);
+        }
+    }
+
+    function _findBackHrefFromLocation() {
+        var urlString = window.location.href;
+        var url = new URL(urlString);
+        return _getUrlParam(url, "backHref");
+    }
+
+    function _getUrlParam(url, key) {
+        if (url.search && url.search.length > 0) {
+            var search = url.search;
+            if (search.startsWith("?")) {
+                search = search.substring(1);
+            }
+            var paramsAsString = search.split("&");
+            for (var i in paramsAsString) {
+                var param = paramsAsString[i];
+                var params = param.split("=");
+                if (params.length > 1 && params[0] === key) {
+                    return params[1];
+                }
+            }
+        }
+        return undefined;
+    }
+
+    function _getCurrentLocation() {
+        var href = $(cancelButton)[0].getAttribute("href");
+        var host = window.location.host;
+        if (href.indexOf(host) !== -1) {
+            return href.substring(href.lastIndexOf(host) + host.length);
+        } else {
+            return href;
+        }
+    }
+
+
+    function promoteTag(element) {
+        var tagLabelText = element[0].label.innerText;
+        // var tagLabel = tagLabelText.split(' ').join('_').replace('(','').replace(')','');
+        var tagLabel = $(element[0]).attr("name");
+        if (tagLabel) {
+            tagLabel = tagLabel.split(" ").join("_").replace("(", "").replace(")", "");
+        }
+
+        var tag = new Coral.Tag().set({
+            label: {
+                // Strip-off confidence score from promoted tags. CQ-4199975
+                innerHTML: tagLabelText.replace(/ \([0-9]+\)/, "")
+            },
+            color: "yellow",
+            multiline: true,
+            closable: true,
+            value: "promoted-smartTag-" + tagLabel
+        });
+
+
+        document.getElementsByClassName("promoted-smart-tags")[0].appendChild(tag);
+        $("coral-tag[value='promoted-smartTag-" + tagLabel + "']").attr("id", "promoted-smartTag-" + tagLabel);
+
+        var promotedTagsTooltip = new Coral.Tooltip().set({
+            content: {
+                innerHTML: "promoted"
+            },
+            placement: "bottom",
+            target: "#promoted-smartTag-" + tagLabel
+        });
+        document.getElementsByClassName("promoted-smart-tags")[0].appendChild(promotedTagsTooltip);
+
+        $(element).find("input").each(function(index) {
+            if ($(this).attr("name").indexOf("confidence@TypeHint") !== -1) {
+                $(this).attr("value", "Double");
+            } else if ($(this).attr("name").indexOf("confidence") !== -1) {
+                $(this).attr("value", "1.00");
+            }
+
+            $(document).find(".promoted-smart-tags>coral-tag[value='promoted-smartTag-" + tagLabel + "']")
+                .append($(this)[0]);
+        });
+    }
+
+
+    $(document).off("submit", "form.foundation-form").on("submit", "form.foundation-form", function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+    });
+
+
+    $(document).on("click", ".predicted-smart-tags coral-tag", function() {
+        if (this.selected) {
+            deselectPredictedTags($(this));
+        } else {
+            deselectPromotedTags($(".promoted-smart-tags>coral-tag"));
+            deselectPromotedTags($("coral-taglist[name='" + DEFAULT_TAG_NAME_ATTRIBUTE + "'] coral-tag"));
+            this.selected = true;
+            this.color = "blue";
+            $(manageTagsDeleteActivator).prop("disabled", false);
+            $(manageTagsPromoteActivator).prop("disabled", false);
+        }
+    });
+
+    $(document).on("click", ".promoted-smart-tags coral-tag, coral-taglist[name='" +
+                            DEFAULT_TAG_NAME_ATTRIBUTE + "'] coral-tag", function(event) {
+        if (this.selected) {
+            deselectPromotedTags($(this));
+        } else {
+            deselectPredictedTags($(".predicted-smart-tags>coral-tag"));
+            this.selected = true;
+            this.color = "blue";
+            $(manageTagsDeleteActivator).prop("disabled", false);
+        }
+    });
+
+    function deselectPredictedTags(elements) {
+        if (elements.length) {
+            $(elements).each(function(index) {
+                var element = elements[index];
+                if (!element.selected) {
+                    return;
+                }
+                element.color = "grey";
+                element.selected = false;
+                if (_noneSelected(".predicted-smart-tags>coral-tag")) {
+                    $(manageTagsDeleteActivator).prop("disabled", true);
+                    $(manageTagsPromoteActivator).prop("disabled", true);
+                }
+            });
+        }
+    }
+
+    function _noneSelected(selector) {
+        var noneSelected = true;
+        $(selector).each(function() {
+            if (this.selected) {
+                noneSelected = false;
+            }
+        });
+        return noneSelected;
+    }
+
+    function deselectPromotedTags(elements) {
+        if (elements.length) {
+            $(elements).each(function(index) {
+                var element = elements[index];
+                if (!element.selected) {
+                    return;
+                }
+                if ($(element).parent("coral-taglist").attr("name") !== DEFAULT_TAG_NAME_ATTRIBUTE) {
+                    element.color = "yellow";
+                } else {
+                    element.color = "grey";
+                }
+                $(element).removeAttr("selected");
+                if (_noneSelected(".promoted-smart-tags>coral-tag") &&
+                  _noneSelected("coral-taglist[name='" + DEFAULT_TAG_NAME_ATTRIBUTE + "'] coral-tag")) {
+                    $(manageTagsDeleteActivator).prop("disabled", true);
+                }
+            });
+        }
+    }
+
+    $(document).on("click", manageTagsSaveActivator, function(e) {
+        saveChanges();
+    });
+
+
+    $(document).on("click", manageTagsPromoteActivator, function(e) {
+        $(".predicted-smart-tags>coral-tag").each(function(index) {
+            if (!this.selected) {
+                return;
+            }
+            promoteTag($(this));
+            $(manageTagsDeleteActivator).prop("disabled", true);
+            $(manageTagsPromoteActivator).prop("disabled", true);
+            $(this).remove();
+            enableSave();
+        });
+    });
+
+    $(document).on("click", manageTagsDeleteActivator, function(e) {
+        $(".predicted-smart-tags>coral-tag").each(function(index) {
+            if (this.selected) {
+                $(this).remove();
+            }
+        });
+
+        $(".promoted-smart-tags>coral-tag").each(function(index) {
+            if (this.selected) {
+                $(this).remove();
+            }
+        });
+
+        $("coral-taglist[name='" + DEFAULT_TAG_NAME_ATTRIBUTE + "'] coral-tag").each(function(index) {
+            if (this.selected) {
+                $(this).remove();
+            }
+        });
+        $(manageTagsDeleteActivator).prop("disabled", true);
+        $(manageTagsPromoteActivator).prop("disabled", true);
+        enableSave();
+    });
+
+    $(document).on("click", "#managetags-previous-activator", function(e) {
+        _previousPage();
+    });
+
+    $(document).on("click", "#managetags-next-activator", function(e) {
+        _nextPage();
+    });
+
+    $(document).on("click", "#managetags-reset-activator", function(e) {
+        if (formChanged) {
+            window.location.assign(vanityPath + currentAsset + "?backHref=" + backHref);
+        }
+    });
+
+
+    $(document).on("keydown", function(e) {
+        var keynum;
+
+        if (window.event) { // IE
+            keynum = e.keyCode;
+        } else if (e.which) { // other browsers
+            keynum = e.which;
+        }
+
+        if (keynum === 37) { // left arrow
+            _previousPage();
+        } else if (keynum === 39) { // right arrow
+            _nextPage();
+        }
+    });
+
+    function _nextPage() {
+        if (!backHref) {
+            _updateBackHref();
+        }
+        if (!nextAsset) {
+            return;
+        }
+        if (!formChanged) {
+            window.location.assign(vanityPath + nextAsset + "?backHref=" + backHref);
+        } else {
+            showPrompt(vanityPath + nextAsset + "?backHref=" + backHref);
+        }
+    }
+
+    function _previousPage() {
+        if (!backHref) {
+            _updateBackHref();
+        }
+        if (!prevAsset) {
+            return;
+        }
+        if (!formChanged) {
+            window.location.assign(vanityPath + prevAsset + "?backHref=" + backHref);
+        } else {
+            showPrompt(vanityPath + prevAsset + "?backHref=" + backHref);
+        }
+    }
+
+    function createNewTags() {
+        return $.when.apply(null, $('.cq-ui-tagfield coral-taglist input[type="hidden"][name]').map(function() {
+            var el = this;
+
+            if (el.value.indexOf(":") >= 0) {
+                return;
+            }
+
+            var tenantId = $(manageTagsInfoRel).attr("tenant-id");
+            el.value = tenantId ? ("mac:" + tenantId + "/default/" + el.previousElementSibling.textContent)
+                : el.previousElementSibling.textContent;
+            return createSingleTag(el.value).then(function(tag) {
+                // Fix tag name in select element
+                var tenantId = $(manageTagsInfoRel).attr("tenant-id");
+                if (!tenantId) {
+                    // Fix tag name in select element
+                    el.value = tag;
+                }
+            });
+        }));
+    }
+
+    function createSingleTag(name) {
+        return $.post(Granite.HTTP.externalize("/bin/tagcommand"), {
+            cmd: "createTagByTitle",
+            tag: name,
+            locale: "en", // This is fixed to "en" in old siteadmin also
+            "_charset_": "utf-8"
+        }).then(function(html) {
+            return $(html).find("#Path").text();
+        });
+    }
+})(document, Granite.$);
